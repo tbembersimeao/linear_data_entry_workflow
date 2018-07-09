@@ -15,6 +15,8 @@ use REDCap;
  */
 class ExternalModule extends AbstractExternalModule {
 
+    static protected $deniedForms;
+
     /**
      * @inheritdoc
      */
@@ -25,23 +27,22 @@ class ExternalModule extends AbstractExternalModule {
 
         // Initializing settings JS variable.
         echo '<script>var linearDataEntryWorkflow = {};</script>';
-        $record = null;
 
         switch (PAGE) {
             case 'DataEntry/record_home.php':
-                if (empty($_GET['id'])) {
-                    break;
-                }
-
-                $record = $_GET['id'];
+                $args_order = array('pid', 'id', 'event_id', 'page');
+                break;
 
             case 'DataEntry/record_status_dashboard.php':
-                $location = str_replace('.php', '', str_replace('DataEntry/', '', PAGE));
-                $arm = empty($_GET['arm']) ? 1 : $_GET['arm'];
-
-                $this->loadRFIO($location, $arm, $record);
+                $args_order = array('pid', 'id', 'page', 'event_id', 'instance');
                 break;
+
+            default:
+                return;
+
         }
+
+        $this->loadBulletsHandler($args_order, $this->getNumericQueryParam('arm', 1), $this->getNumericQueryParam('id'));
     }
 
     /**
@@ -51,116 +52,51 @@ class ExternalModule extends AbstractExternalModule {
         global $Proj;
 
         if (!$record) {
-            $record = $_GET['id'];
+            $record = $this->getNumericQueryParam('id');
         }
 
-        if ($this->loadRFIO('data_entry_form', $Proj->eventInfo[$event_id]['arm_num'], $record, $event_id, $instrument)) {
-            $this->loadFDEC($instrument);
-            $this->loadAutoLock($instrument);
+        $this->loadBulletsHandler(array('pid', 'page', 'id', 'event_id'), $Proj->eventInfo[$event_id]['arm_num'], $record, $event_id, $form);
+        $this->loadButtonsHandler($record, $event_id, $form);
+
+        if (($exceptions = $this->getProjectSetting('forms-exceptions', $project_id)) && in_array($instrument, $exceptions)) {
+            return;
+        }
+
+        $this->loadFDEC($instrument);
+        $this->loadAutoLock($project_id, $instrument);
+    }
+
+    function loadBulletsHandler($args_order, $arm, $record = null, $event_id = null, $form = null) {
+        $args = array_combine($args_order, array_fill(0, count($args_order), '1'));
+        $args['pid'] = PROJECT_ID;
+
+        $selectors = array();
+        foreach ($this->getDeniedForms($arm, $record, $event_id, $form) as $id => $events) {
+            $args['id'] = $id;
+
+            foreach ($events as $event_id => $forms) {
+                $args['event_id'] = $event_id;
+
+                foreach ($forms as $page) {
+                    $args['page'] = $page;
+                    $selectors[] = 'a[href="' . APP_PATH_WEBROOT . 'DataEntry/index.php?' . http_build_query($args) . '"]';
+                }
+            }
+        }
+
+        if (!empty($selectors)) {
+            echo '<style>' . implode(', ', $selectors) . ' { opacity: .1; pointer-events: none; }</style>';
         }
     }
 
-    /**
-     * Loads RFIO (review fields in order) feature.
-     *
-     * @param string $location
-     *   The location to apply RFIO. Can be:
-     *   - data_entry_form
-     *   - record_home
-     *   - record_status_dashboard
-     * @param string $arm
-     *   The arm name.
-     * @param int $record
-     *   The data entry record ID.
-     * @param int $event_id
-     *   The event ID. Only required when $location = "data_entry_form".
-     * @param string $instrument
-     *   The form/instrument name.
-     *
-     * @return bool
-     *   TRUE if the current user has access to the current form;
-     *   FALSE if the user is going to be redirected out the page.
-     */
-    protected function loadRFIO($location, $arm, $record = null, $event_id = null, $instrument = null) {
-        // Proj is a REDCap var used to pass information about the current project.
+    function loadButtonsHandler($record, $event_id, $form) {
         global $Proj;
-
-        // Use form names to contruct complete_status field names.
-        $fields = array();
-        foreach (array_keys($Proj->forms) as $form_name) {
-            $fields[$form_name] = $form_name . '_complete';
-        }
-
-        $completed_forms = REDCap::getData($Proj->project_id, 'array', $record, $fields);
-        if ($record && !isset($completed_forms[$record])) {
-            // Handling new record case.
-            $completed_forms = array($record => array());
-        }
 
         if (!$exceptions = $this->getProjectSetting('forms-exceptions', $Proj->project_id)) {
             $exceptions = array();
         }
 
-        // Handling possible conflicts with CTSIT's Form Render Skip Logic.
-        $prefix = 'form_render_skip_logic';
-        $enabled_modules = ExternalModules::getEnabledModules($Proj->project_id);
-        if (isset($enabled_modules[$prefix])) {
-            $frsl = ExternalModules::getModuleInstance($prefix, $enabled_modules[$prefix]);
-            $frsl_forms_access = $frsl->getFormsAccessMatrix($arm, $record);
-        }
-
-        // Building forms access matrix.
-        $forms_access = array();
-        foreach ($completed_forms as $id => $data) {
-            $forms_access[$id] = array();
-            $prev_form_completed = true;
-
-            foreach (array_keys($Proj->events[$arm]['events']) as $event) {
-                $forms_access[$id][$event] = array();
-
-                foreach ($Proj->eventsForms[$event] as $form) {
-                    $forms_access[$id][$event][$form] = true;
-
-                    if (in_array($form, $exceptions)) {
-                        continue;
-                    }
-
-                    if (isset($frsl_forms_access) && !$frsl_forms_access[$id][$event][$form]) {
-                        continue;
-                    }
-
-                    if (!$prev_form_completed) {
-                        if ($id == $record && $event == $event_id && $instrument == $form) {
-                            // Access denied to the current page.
-                            $this->redirect(APP_PATH_WEBROOT . 'DataEntry/record_home.php?pid=' . $Proj->project_id . '&id=' . $record . '&arm=' . $arm);
-                            return false;
-                        }
-
-                        $forms_access[$id][$event][$form] = false;
-                        continue;
-                    }
-
-                    if (empty($data['repeat_instances'][$event][$form])) {
-                        $prev_form_completed = !empty($data[$event][$fields[$form]]) && $data[$event][$fields[$form]] == 2;
-                        continue;
-                    }
-
-                    // Repeat instances case.
-                    foreach ($data['repeat_instances'][$event][$form] as $instance) {
-                        if (empty($instance[$fields[$form]]) || $instance[$fields[$form]] != 2) {
-                            // Block access to next instrument if an instance is
-                            // not completed.
-                            $prev_form_completed = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
         $settings = array(
-            'formsAccess' => $forms_access,
-            'location' => $location,
             'instrument' => $instrument,
             'isException' => in_array($instrument, $exceptions),
             'forceButtonsDisplay' => $Proj->lastFormName == $instrument ? 'show' : false,
@@ -184,14 +120,120 @@ class ExternalModule extends AbstractExternalModule {
                 // - Case B: the next form is accessible, so we need to keep the
                 //   buttons visible, no matter if form gets shifted to a non
                 //   Completed status.
-                $settings['forceButtonsDisplay'] = $forms_access[$record][$event_id][$next_form] ? 'show' : 'hide';
+
+                $settings['forceButtonsDisplay'] = 'hide';
+                if (empty(self::$deniedForms[$record][$event_id][$next_form])) {
+                    $settings['forceButtonsDisplay'] = 'show';
+
+                    // Handling possible conflicts with CTSIT's Form Render Skip Logic.
+                    if (defined('FORM_RENDER_SKIP_LOGIC_PREFIX')) {
+                        $arm = $Proj->eventInfo[$event_id]['arm_num'];
+                        $denied_forms = ExternalModules::getModuleInstance(FORM_RENDER_SKIP_LOGIC_PREFIX)->getDeniedForms($arm, $record);
+
+                        if (!empty($deniedForms[$record][$event_id][$next_form])) {
+                            $settings['forceButtonsDisplay'] = 'hide';
+                        }
+                    }
+                }
             }
         }
 
         $this->setJsSetting('rfio', $settings);
         $this->includeJs('js/rfio.js');
+    }
 
-        return true;
+    /**
+     * Loads forms access matrix.
+     *
+     * @param string $arm
+     *   The arm name.
+     * @param int $record
+     *   The data entry record ID.
+     * @param int $event_id
+     *   The event ID. Only required when $location = "data_entry_form".
+     * @param string $instrument
+     *   The form/instrument name.
+     */
+    function getDeniedForms($arm, $record = null, $event_id = null, $instrument = null) {
+        if (isset(self::$deniedForms)) {
+            return self::$deniedForms;
+        }
+
+        // Proj is a REDCap var used to pass information about the current project.
+        global $Proj;
+
+        // Use form names to contruct complete_status field names.
+        $fields = array();
+        foreach (array_keys($Proj->forms) as $form_name) {
+            $fields[$form_name] = $form_name . '_complete';
+        }
+
+        $completed_forms = REDCap::getData($Proj->project_id, 'array', $record, $fields);
+        if ($record && !isset($completed_forms[$record])) {
+            // Handling new record case.
+            $completed_forms = array($record => array());
+        }
+
+        if (!$exceptions = $this->getProjectSetting('forms-exceptions', $Proj->project_id)) {
+            $exceptions = array();
+        }
+
+        // Building forms access matrix.
+        $denied_forms = array();
+
+        // Handling possible conflicts with CTSIT's Form Render Skip Logic.
+        if (defined('FORM_RENDER_SKIP_LOGIC_PREFIX')) {
+            $denied_forms = ExternalModules::getModuleInstance(FORM_RENDER_SKIP_LOGIC_PREFIX)->getDeniedForms($arm, $record);
+        }
+
+        foreach ($completed_forms as $id => $data) {
+            if (!isset($denied_forms[$id])) {
+                $denied_forms[$id] = array();
+            }
+
+            $prev_form_completed = true;
+
+            foreach (array_keys($Proj->events[$arm]['events']) as $event) {
+                if (!isset($denied_forms[$id][$event])) {
+                    $denied_forms[$id][$event] = array();
+                }
+
+                foreach ($Proj->eventsForms[$event] as $form) {
+                    if (!empty($denied_forms[$id][$event][$form]) || in_array($form, $exceptions)) {
+                        continue;
+                    }
+
+                    if (!$prev_form_completed) {
+                        if ($id == $record && $event == $event_id && $instrument == $form) {
+                            // Access denied to the current page.
+                            $this->redirect(APP_PATH_WEBROOT . 'DataEntry/record_home.php?pid=' . $Proj->project_id . '&id=' . $record . '&arm=' . $arm);
+                            return false;
+                        }
+
+                        $denied_forms[$id][$event][$form] = $form;
+                        continue;
+                    }
+
+                    if (empty($data['repeat_instances'][$event][$form])) {
+                        $prev_form_completed = !empty($data[$event][$fields[$form]]) && $data[$event][$fields[$form]] == 2;
+                        continue;
+                    }
+
+                    // Repeat instances case.
+                    foreach ($data['repeat_instances'][$event][$form] as $instance) {
+                        if (empty($instance[$fields[$form]]) || $instance[$fields[$form]] != 2) {
+                            // Block access to next instrument if an instance is
+                            // not completed.
+                            $prev_form_completed = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        self::$deniedForms = $denied_forms;
+        return $denied_forms;
     }
 
     /**
@@ -207,11 +249,6 @@ class ExternalModule extends AbstractExternalModule {
      *   - "" (Empty status)
      */
     protected function loadFDEC($instrument, $statuses_bypass = array('', 0, 1)) {
-        $exceptions = $this->getProjectSetting('forms-exceptions', $project_id);
-        if ($exceptions && in_array($instrument, $exceptions)) {
-            return;
-        }
-
         global $Proj;
 
         // Markup of required fields bullets list.
@@ -254,27 +291,17 @@ class ExternalModule extends AbstractExternalModule {
     /**
      * Loads auto-lock feature.
      */
-    protected function loadAutoLock($instrument) {
-      global $user_rights;
-      global $Proj;
+    protected function loadAutoLock($project_id, $instrument) {
+        if (!$roles_to_lock = $this->getProjectSetting('auto-locked-roles', $Proj->project_id)) {
+            return;
+        }
 
-      //get list of exceptions
-      if (!$exceptions = $this->getProjectSetting('forms-exceptions', $Proj->project_id)) {
-          $exceptions = array();
-      }
+        global $user_rights;
 
-      //if current form is in the exception list then disable auto-locking
-      if (in_array($instrument, $exceptions)) {
-        return;
-      }
-
-      //get list of roles to enforce auto-locking on
-      $roles_to_lock = $this->getProjectSetting("auto-locked-roles", $Proj->project_id);
-
-      //load auto-lock script if user is in an auto-locked role
-      if (in_array($user_rights["role_id"], $roles_to_lock)) {
-        $this->includeJs("js/auto-lock.js");
-      }
+        // Load auto-lock script if user is in an auto-locked role.
+        if (in_array($user_rights['role_id'], $roles_to_lock)) {
+            $this->includeJs('js/auto-lock.js');
+        }
     }
 
     /**
@@ -317,5 +344,21 @@ class ExternalModule extends AbstractExternalModule {
      */
     protected function setJsSetting($key, $value) {
         echo '<script>linearDataEntryWorkflow.' . $key . ' = ' . json_encode($value) . ';</script>';
+    }
+
+    /**
+     * Gets numeric URL query parameter.
+     *
+     * @param string $param
+     *   The parameter name
+     * @param mixed $default
+     *   The default value if query parameter is not available.
+     *
+     * @return mixed
+     *   The parameter from URL if available. The default value provided is
+     *   returned otherwise.
+     */
+    function getNumericQueryParam($param, $default = null) {
+        return empty($_GET[$param]) || intval($_GET[$param]) != $_GET[$param] ? $default : $_GET[$param];
     }
 }

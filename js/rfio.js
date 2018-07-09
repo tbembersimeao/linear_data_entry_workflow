@@ -1,84 +1,22 @@
 document.addEventListener('DOMContentLoaded', function() {
     var settings = linearDataEntryWorkflow.rfio;
-    var $links;
-
-    switch (settings.location) {
-        case 'data_entry_form':
-            var $buttonsBottom = $('#__SUBMITBUTTONS__-div .btn-group');
-            var $buttonsTop = $('#formSaveTip .btn-group');
-
-            if (settings.hideNextRecordButton && !settings.isException) {
-                // Hiding "Save & Go To Next Record" buttons.
-                removeButtons('savenextrecord');
-            }
-
-            if (settings.forceButtonsDisplay !== 'show') {
-                // Hiding "Save & Go to Next Form" buttons.
-                hideNextFormButtons(settings.instrument, settings.forceButtonsDisplay === 'hide');
-            }
-
-            $links = $('.formMenuList a');
-            break;
-        case 'record_home':
-            $links = $('#event_grid_table a');
-            break;
-        case 'record_status_dashboard':
-            $links = $('#record_status_table a');
-            break;
+    if (settings.hideNextRecordButton && !settings.isException) {
+        // Hiding "Save & Go To Next Record" buttons.
+        removeButtons('savenextrecord');
     }
 
-    if (typeof $links === 'undefined' || $links.length === 0) {
-        return false;
-    }
-
-    $links.each(function() {
-        if (this.href.indexOf(app_path_webroot + 'DataEntry/index.php?') === -1) {
-            return;
-        }
-
-        var params = getQueryParameters(this.href);
-        if (!settings.formsAccess[params.id][params.event_id][params.page]) {
-            disableForm(this);
-        }
-    });
-
-    /**
-     * Disables a link to a form.
-     */
-    function disableForm(cell) {
-        cell.style.pointerEvents = 'none';
-        cell.style.opacity = '.1';
-    }
-
-    /**
-     * Returns the query string of the given url string.
-     */
-    function getQueryString(url) {
-        url = decodeURI(url);
-        return url.match(/\?.+/)[0];
-    }
-
-    /**
-     * Returns a set of key-value pairs that correspond to the query
-     * parameters in the given url.
-     */
-    function getQueryParameters(url) {
-        var parameters = {};
-        var queryString = getQueryString(url);
-        var reg = /([^?&=]+)=?([^&]*)/g;
-        var keyValuePair;
-
-        while (keyValuePair = reg.exec(queryString)) {
-            parameters[keyValuePair[1]] = keyValuePair[2];
-        }
-
-        return parameters;
+    if (settings.forceButtonsDisplay !== 'show') {
+        // Hiding "Save & Go to Next Form" buttons.
+        hideNextFormButtons(settings.instrument, settings.forceButtonsDisplay === 'hide');
     }
 
     /**
      * Hide "Save and Go to Next Form" buttons.
      */
     function hideNextFormButtons(instrument, force = false) {
+        var $buttonsBottom = $('#__SUBMITBUTTONS__-div .btn-group');
+        var $buttonsTop = $('#formSaveTip .btn-group');
+
         // Handling "Ignore and go to next form" button on required fields
         // dialog.
         $('#reqPopup').on('dialogopen', function(event, ui) {
